@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>position__c</fullName>
+    <deleteConstraint>SetNull</deleteConstraint>
+    <label>position</label>
+    <referenceTo>Job_Applications__c</referenceTo>
+    <relationshipLabel>Job Applications (position)</relationshipLabel>
+    <relationshipName>Job_Applications4</relationshipName>
+    <required>false</required>
+    <trackTrending>false</trackTrending>
+    <type>Lookup</type>
+</CustomField>
