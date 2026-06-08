@@ -22,9 +22,21 @@ jobs:
       - name: Step 3 - Verify CLI installed
         run: sf --version
 
-      - name: Step 4 - Run PMD Static Analysis
+      - name: Step 4 - Authenticate to Salesforce Org
         run: |
-           wget https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.0.0/pmd-dist-7.0.0-bin.zip
-           unzip pmd-dist-7.0.0-bin.zip
-           pmd-bin-7.0.0/bin/pmd check --dir force-app --rulesets category/apex/bestpractices.xml --format text --fail-on-violation --minimum-priority 2
-        
+          echo "${{ secrets.SFDX_AUTH_URL }}" > ./auth-url.txt
+          sf org login sfdx-url --sfdx-url-file ./auth-url.txt --alias targetorg
+
+      - name: Step 5 - Run PMD Static Analysis
+        run: |
+          wget https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.0.0/pmd-dist-7.0.0-bin.zip
+          unzip pmd-dist-7.0.0-bin.zip
+          pmd-bin-7.0.0/bin/pmd check --dir force-app --rulesets category/apex/bestpractices.xml --format text --fail-on-violation --minimum-priority 2
+
+      - name: Step 6 - Run Apex Tests
+        run: |
+          sf apex run test \
+            --synchronous \
+            --code-coverage \
+            --target-org targetorg \
+            --result-format human
