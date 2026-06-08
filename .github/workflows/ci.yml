@@ -39,4 +39,5 @@ jobs:
             --synchronous \
             --code-coverage \
             --target-org targetorg \
-            --result-format human
+            --result-format human \
+            --test-level RunLocalTests
