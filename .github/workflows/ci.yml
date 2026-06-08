@@ -39,5 +39,9 @@ jobs:
             --synchronous \
             --code-coverage \
             --target-org targetorg \
-            --result-format human \
+            --result-format json \
+            --output-dir ./test-results \
             --test-level RunLocalTests
+
+      - name: Step 7 - Check Code Coverage
+        run: node scripts/checkCoverage.js   
