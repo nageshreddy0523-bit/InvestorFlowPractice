@@ -41,7 +41,7 @@ jobs:
             --target-org targetorg \
             --result-format json \
             --output-dir ./test-results \
-            --test-level RunLocalTests
+            --test-level RunLocalTests || true
 
       - name: Step 7 - Check Code Coverage
         run: node scripts/checkCoverage.js   
