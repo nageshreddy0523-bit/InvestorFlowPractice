@@ -21,3 +21,13 @@ jobs:
 
       - name: Step 3 - Verify CLI installed
         run: sf --version
+        
+      - name: Step 4 - Authenticate via JWT
+        run: |
+          echo "${{ secrets.JWT_PRIVATE_KEY }}" > server.key
+          sf org login jwt \
+            --client-id ${{ secrets.CONSUMER_KEY }} \
+            --jwt-key-file server.key \
+            --username ${{ secrets.SF_USERNAME }} \
+            --instance-url ${{ secrets.SF_INSTANCE_URL }} \
+            --alias targetorg
