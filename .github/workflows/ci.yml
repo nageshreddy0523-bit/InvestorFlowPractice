@@ -22,15 +22,10 @@ jobs:
       - name: Step 3 - Verify CLI installed
         run: sf --version
 
-      - name: Step 4 - Authenticate via JWT
+      - name: Step 4 - Authenticate to Salesforce Org
         run: |
-          echo "${{ secrets.JWT_PRIVATE_KEY }}" | base64 -d > server.key
-          sf org login jwt \
-            --client-id ${{ secrets.CONSUMER_KEY }} \
-            --jwt-key-file server.key \
-            --username ${{ secrets.SF_USERNAME }} \
-            --instance-url ${{ secrets.SF_INSTANCE_URL }} \
-            --alias targetorg
+          echo "${{ secrets.SFDX_AUTH_URL }}" > ./auth-url.txt
+          sf org login sfdx-url --sfdx-url-file ./auth-url.txt --alias targetorg
 
       - name: Step 5 - Run PMD Static Analysis
         run: |
