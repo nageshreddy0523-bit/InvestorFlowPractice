@@ -24,7 +24,7 @@ jobs:
 
       - name: Step 4 - Authenticate via JWT
         run: |
-          echo "${{ secrets.JWT_PRIVATE_KEY }}" > server.key
+          echo "${{ secrets.JWT_PRIVATE_KEY }}" | base64 -d > server.key
           sf org login jwt \
             --client-id ${{ secrets.CONSUMER_KEY }} \
             --jwt-key-file server.key \
