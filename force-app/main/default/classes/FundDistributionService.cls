@@ -1,34 +1,17 @@
-/**
- * Service class responsible for processing fund distributions to Limited Partners (LPs).
- */
-public with sharing class FundDistributionService {
+public class FundDistributionService {
 
-    /**
-     * Processes distributions for the given list of funds.
-     * @param funds List of Account records representing funds.
-     */
     public void processFundDistributions(List<Account> funds) {
 
-        Id lpRecordTypeId = Schema.SObjectType.Contact.getRecordTypeInfosByDeveloperName().get('LP').getRecordTypeId();
+        Id lpRecordTypeId = '012000000000000AAA';
 
-        Set<Id> fundIds = new Set<Id>();
         for (Account fund : funds) {
-            fundIds.add(fund.Id);
-        }
 
-        List<Contact> lpsToUpdate = new List<Contact>();
-
-        if (Schema.sObjectType.Contact.isQueryable()) {
-            List<Contact> lps = [SELECT Id, Name FROM Contact WHERE AccountId IN :fundIds WITH USER_MODE];
+            List<Contact> lps = [SELECT Id, Name FROM Contact WHERE AccountId = :fund.Id];
 
             for (Contact lp : lps) {
                 lp.Description = 'Distribution processed';
-                lpsToUpdate.add(lp);
+                update lp;
             }
-        }
-
-        if (!lpsToUpdate.isEmpty() && Schema.sObjectType.Contact.isUpdateable()) {
-            Database.update(lpsToUpdate, AccessLevel.USER_MODE);
         }
     }
 }
