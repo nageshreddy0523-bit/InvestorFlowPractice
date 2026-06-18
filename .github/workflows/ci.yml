@@ -31,7 +31,13 @@ jobs:
         run: |
           wget https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.0.0/pmd-dist-7.0.0-bin.zip
           unzip pmd-dist-7.0.0-bin.zip
-          pmd-bin-7.0.0/bin/pmd check --dir force-app --rulesets category/apex/bestpractices.xml,category/apex/errorprone.xml,category/apex/performance.xml,category/apex/security.xml --format text --fail-on-violation --minimum-priority 3
+          CHANGED_FILES=$(git diff --name-only origin/master...HEAD -- '*.cls' | tr '\n' ',')
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No Apex files changed, skipping PMD."
+          else
+            echo "Scanning changed files: $CHANGED_FILES"
+            pmd-bin-7.0.0/bin/pmd check --file-list <(echo "$CHANGED_FILES" | tr ',' '\n') --rulesets category/apex/bestpractices.xml,category/apex/errorprone.xml,category/apex/performance.xml,category/apex/security.xml --format text --fail-on-violation --minimum-priority 3
+          fi
 
       - name: Step 6 - Run Apex Tests
         run: |
