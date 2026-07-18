@@ -1,0 +1,400 @@
+name: PipeRE Build Automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      skip_namespace_replacement:
+        description: "Skip namespace replacement step"
+        required: false
+        type: boolean
+        default: false
+      target_org_alias:
+        description: "Target QA org alias for installation"
+        required: false
+        type: string
+        default: "PipeRE-QA"
+      promotion:
+        description: "Promote package version to Released after build"
+        required: false
+        type: boolean
+        default: true
+      base_ref:
+        description: "Base git ref for delta comparison (branch, tag, or SHA)"
+        required: false
+        type: string
+        default: "HEAD~1"
+      skip_apex_tests:
+        description: "Skip delta Apex test execution"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  SF_AUTOUPDATE_DISABLE: true
+  SF_USE_GENERIC_UNIX_KEYCHAIN: true
+  PACKAGE_ID: ${{ vars.PIPERE_PACKAGE_ID }}
+  DEVHUB_USERNAME: ${{ vars.SF_DEVHUB_USERNAME }}
+  QA_USERNAME: ${{ vars.SF_QA_USERNAME }}
+
+jobs:
+  build-package:
+    name: PipeRE 2GP Build
+    runs-on: ubuntu-latest
+    outputs:
+      package_version_id: ${{ steps.create_package.outputs.package_version_id }}
+      version_number: ${{ steps.calc_version.outputs.version_number }}
+      install_url: ${{ steps.create_package.outputs.install_url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      # Node 24 is fine, but 24.17+ has a known bug with Salesforce CLI
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.16.0"
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install @salesforce/cli -g
+          sf --version
+
+      - name: Authenticate to DevHub
+        env:
+          SALESFORCE_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
+          SALESFORCE_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+          SALESFORCE_DEVHUB_URL: ${{ vars.SF_DEVHUB_URL }}
+        run: |
+          echo "$SALESFORCE_JWT_KEY" > ./server.key
+          chmod 600 ./server.key
+          sf org login jwt \
+            --username "$DEVHUB_USERNAME" \
+            --client-id "$SALESFORCE_CONSUMER_KEY" \
+            --jwt-key-file ./server.key \
+            --instance-url "$SALESFORCE_DEVHUB_URL" \
+            --set-default-dev-hub \
+            --alias DevHub
+          rm -f ./server.key
+          sf org list
+
+      - name: Perform Namespace Replacements
+        if: ${{ github.event.inputs.skip_namespace_replacement != 'true' }}
+        run: node ./scripts/namespace-replace.js
+
+      - name: Install sfdx-git-delta (SGD) plugin
+        if: ${{ github.event.inputs.skip_apex_tests != 'true' }}
+        run: |
+          echo "y" | sf plugins install sfdx-git-delta
+          sf plugins --core
+
+      - name: Generate delta package
+        if: ${{ github.event.inputs.skip_apex_tests != 'true' }}
+        id: sgd
+        run: |
+          BASE_REF="${{ github.event.inputs.base_ref }}"
+          echo "Generating delta between ${BASE_REF} and HEAD..."
+
+          mkdir -p delta
+
+          sf sgd:source:delta \
+            --from "$BASE_REF" \
+            --to HEAD \
+            --output delta \
+            --generate-delta
+
+          echo "=== Delta package.xml ==="
+          if [ -f "delta/package/package.xml" ]; then
+            cat delta/package/package.xml
+            echo "has_delta=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No changes detected in delta."
+            echo "has_delta=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Identify Apex test classes from delta
+        if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.sgd.outputs.has_delta == 'true' }}
+        id: find_tests
+        run: |
+          TEST_CLASSES=""
+
+          if [ -d "delta/force-app/main/default/classes" ]; then
+            for cls_file in delta/force-app/main/default/classes/*Test*.cls delta/force-app/main/default/classes/*_Test.cls; do
+              if [ -f "$cls_file" ]; then
+                CLASS_NAME=$(basename "$cls_file" .cls)
+                if [ -n "$TEST_CLASSES" ]; then
+                  TEST_CLASSES="${TEST_CLASSES},${CLASS_NAME}"
+                else
+                  TEST_CLASSES="${CLASS_NAME}"
+                fi
+              fi
+            done
+          fi
+
+          if [ -z "$TEST_CLASSES" ]; then
+            echo "No Apex test classes found in delta. Scanning for related tests..."
+
+            for cls_file in delta/force-app/main/default/classes/*.cls 2>/dev/null; do
+              [ -f "$cls_file" ] || continue
+              CLASS_NAME=$(basename "$cls_file" .cls)
+
+              for test_pattern in "${CLASS_NAME}Test" "${CLASS_NAME}_Test" "Test${CLASS_NAME}"; do
+                if [ -f "force-app/main/default/classes/${test_pattern}.cls" ]; then
+                  if [ -n "$TEST_CLASSES" ]; then
+                    TEST_CLASSES="${TEST_CLASSES},${test_pattern}"
+                  else
+                    TEST_CLASSES="${test_pattern}"
+                  fi
+                fi
+              done
+            done
+          fi
+
+          TEST_CLASSES=$(echo "$TEST_CLASSES" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+          echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$TEST_CLASSES" ]; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+            echo "Apex test classes to run: $TEST_CLASSES"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+            echo "No related Apex test classes found."
+          fi
+
+      - name: Run Apex tests (delta validation)
+        if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.find_tests.outputs.has_tests == 'true' }}
+        run: |
+          TEST_CLASSES="${{ steps.find_tests.outputs.test_classes }}"
+          echo "Running Apex tests: $TEST_CLASSES"
+
+          sf project deploy start \
+            --manifest delta/package/package.xml \
+            --target-org DevHub \
+            --dry-run \
+            --test-level RunSpecifiedTests \
+            --tests "$TEST_CLASSES" \
+            --wait 30
+
+          echo "All Apex tests passed."
+
+      - name: Validate Package Source
+        if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.sgd.outputs.has_delta == 'true' }}
+        run: |
+          TEST_LEVEL="NoTestRun"
+          TEST_ARGS=""
+
+          if [ "${{ steps.find_tests.outputs.has_tests }}" == "true" ]; then
+            TEST_LEVEL="RunSpecifiedTests"
+            TEST_ARGS="--tests ${{ steps.find_tests.outputs.test_classes }}"
+          fi
+
+          echo "Validating full package source (test level: ${TEST_LEVEL})..."
+
+          sf project deploy start \
+            --source-dir force-app \
+            --target-org DevHub \
+            --dry-run \
+            --test-level "$TEST_LEVEL" \
+            $TEST_ARGS \
+            --wait 30
+
+          echo "Package source validation passed."
+
+      - name: Calculate Package Version Number
+        id: calc_version
+        run: |
+          chmod +x ./scripts/calculate-version.sh
+          VERSION=$(./scripts/calculate-version.sh "$PACKAGE_ID" "$DEVHUB_USERNAME")
+          echo "version_number=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Calculated version: $VERSION"
+
+      - name: Create Package Version (Build)
+        id: create_package
+        run: |
+          echo "Building package version ${{ steps.calc_version.outputs.version_number }}..."
+
+          BUILD_RESULT=$(sf package version create \
+            --package "$PACKAGE_ID" \
+            --installation-key-bypass \
+            --wait 60 \
+            --version-number "${{ steps.calc_version.outputs.version_number }}" \
+            --code-coverage \
+            --target-dev-hub DevHub \
+            --json 2>&1) || true
+
+          echo "$BUILD_RESULT" | jq '.' || echo "$BUILD_RESULT"
+
+          SUBSCRIBER_PKG_VERSION_ID=$(echo "$BUILD_RESULT" | jq -r '.result.SubscriberPackageVersionId // empty')
+
+          if [ -z "$SUBSCRIBER_PKG_VERSION_ID" ]; then
+            echo "::error::Package version creation failed"
+            echo "$BUILD_RESULT"
+            exit 1
+          fi
+
+          INSTALL_URL="https://login.salesforce.com/packaging/installPackage.apexp?p0=${SUBSCRIBER_PKG_VERSION_ID}"
+
+          echo "package_version_id=$SUBSCRIBER_PKG_VERSION_ID" >> "$GITHUB_OUTPUT"
+          echo "install_url=$INSTALL_URL" >> "$GITHUB_OUTPUT"
+          echo "Package Version ID: $SUBSCRIBER_PKG_VERSION_ID"
+          echo "Install URL: $INSTALL_URL"
+
+      - name: Promote Package Version
+        if: ${{ github.event.inputs.promotion == 'true' }}
+        run: |
+          sf package version promote \
+            --package "${{ steps.create_package.outputs.package_version_id }}" \
+            --no-prompt \
+            --target-dev-hub DevHub
+
+          echo "Package version promoted to Released."
+
+  install-qa:
+    name: Install to PipeRE QA
+    needs: build-package
+    runs-on: ubuntu-latest
+    if: ${{ needs.build-package.outputs.package_version_id != '' }}
+
+    steps:
+      - name: Install Salesforce CLI
+        run: |
+          npm install @salesforce/cli -g
+          sf --version
+
+      - name: Authenticate to QA Org
+        env:
+          SF_QA_JWT_KEY: ${{ secrets.SF_QA_JWT_KEY }}
+          SF_QA_CONSUMER_KEY: ${{ secrets.SF_QA_CONSUMER_KEY }}
+          SF_QA_URL: ${{ vars.SF_QA_URL }}
+        run: |
+          echo "$SF_QA_JWT_KEY" > ./server.key
+          chmod 600 ./server.key
+          sf org login jwt \
+            --username "$QA_USERNAME" \
+            --client-id "$SF_QA_CONSUMER_KEY" \
+            --jwt-key-file ./server.key \
+            --instance-url "$SF_QA_URL" \
+            --alias "${{ github.event.inputs.target_org_alias }}"
+          rm -f ./server.key
+
+      - name: Install Package in QA Org
+        run: |
+          echo "Installing package ${{ needs.build-package.outputs.package_version_id }} into QA org..."
+
+          sf package install \
+            --package "${{ needs.build-package.outputs.package_version_id }}" \
+            --target-org "${{ github.event.inputs.target_org_alias }}" \
+            --wait 20 \
+            --publish-wait 10 \
+            --no-prompt
+
+          echo "Package installed successfully."
+
+  notify-success:
+    name: Notify Slack (Success)
+    needs: [build-package, install-qa]
+    runs-on: ubuntu-latest
+    if: ${{ success() }}
+
+    steps:
+      - name: Post to release-versions Slack channel
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          VERSION="${{ needs.build-package.outputs.version_number }}"
+          INSTALL_URL="${{ needs.build-package.outputs.install_url }}"
+          PKG_VERSION_ID="${{ needs.build-package.outputs.package_version_id }}"
+
+          MESSAGE="PipeRE ${VERSION} ${INSTALL_URL}"
+
+          curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg channel "${{ vars.SLACK_RELEASE_VERSIONS_CHANNEL_ID }}" \
+              --arg text "$MESSAGE" \
+              --arg version "$VERSION" \
+              --arg url "$INSTALL_URL" \
+              --arg pkg_id "$PKG_VERSION_ID" \
+              '{
+                channel: $channel,
+                text: $text,
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ("*PipeRE " + $version + "*\n<" + $url + "|Install Package>")
+                    }
+                  },
+                  {
+                    type: "context",
+                    elements: [
+                      {
+                        type: "mrkdwn",
+                        text: ("Package Version ID: `" + $pkg_id + "`")
+                      }
+                    ]
+                  }
+                ]
+              }')"
+
+          echo "Posted build notification to release-versions channel."
+
+  notify-failure:
+    name: Notify Slack (Failure)
+    needs: [build-package, install-qa]
+    runs-on: ubuntu-latest
+    if: ${{ failure() }}
+
+    steps:
+      - name: Post failure to cowboy-beep-boop Slack channel
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          curl -s -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg channel "${{ vars.SLACK_COWBOY_CHANNEL_ID }}" \
+              --arg run_url "$RUN_URL" \
+              --arg actor "${{ github.actor }}" \
+              --arg ref "${{ github.ref_name }}" \
+              '{
+                channel: $channel,
+                text: ":x: PipeRE build failed. See workflow run for details.",
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ":x: *PipeRE Build Failed*"
+                    }
+                  },
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: ("The PipeRE build pipeline has failed.\n<" + $run_url + "|View Workflow Run>")
+                    }
+                  },
+                  {
+                    type: "context",
+                    elements: [
+                      {
+                        type: "mrkdwn",
+                        text: ("Triggered by: *" + $actor + "* | Branch: `" + $ref + "`")
+                      }
+                    ]
+                  }
+                ]
+              }')"
+
+          echo "Posted failure notification to cowboy-beep-boop channel."
