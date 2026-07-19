@@ -50,6 +50,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_code_coverage:
+        description: "Skip code coverage enforcement (tests still run, 75% threshold not enforced)"
+        required: false
+        type: boolean
+        default: false
       verify_package:
         description: "Run post-build package verification (code coverage check)"
         required: false
@@ -260,12 +265,18 @@ jobs:
             ANCESTOR_FLAG="--skip-ancestor-check"
           fi
 
+          COVERAGE_FLAG="--code-coverage"
+          if [ "${{ github.event.inputs.skip_code_coverage }}" == "true" ]; then
+            COVERAGE_FLAG=""
+            echo "Code coverage enforcement skipped."
+          fi
+
           BUILD_RESULT=$(sf package version create \
             --package "${{ steps.resolve_pkg.outputs.package_id }}" \
             --installation-key-bypass \
             --wait 60 \
             --version-number "${{ steps.calc_version.outputs.version_number }}" \
-            --code-coverage \
+            $COVERAGE_FLAG \
             $ANCESTOR_FLAG \
             --target-dev-hub DevHub \
             --json 2>&1) || true
@@ -311,7 +322,7 @@ jobs:
 
           if [ "$HAS_PASSED" == "false" ]; then
             echo "::error::Package version failed code coverage check (${CODE_COV}% — minimum 75% required)"
-            exit 0
+            exit 1
           fi
 
           echo "Package version verified successfully."
