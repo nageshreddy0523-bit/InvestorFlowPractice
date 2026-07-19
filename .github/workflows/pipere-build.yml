@@ -320,7 +320,9 @@ jobs:
           echo "Coverage Check: ${HAS_PASSED}"
           echo "Validation Skipped: ${STATUS}"
 
-          if [ "$HAS_PASSED" == "false" ]; then
+          if [ "${{ github.event.inputs.skip_code_coverage }}" == "true" ]; then
+            echo "Code coverage enforcement was skipped. Proceeding regardless of coverage."
+          elif [ "$HAS_PASSED" == "false" ]; then
             echo "::error::Package version failed code coverage check (${CODE_COV}% — minimum 75% required)"
             exit 1
           fi
@@ -336,6 +338,27 @@ jobs:
             --target-dev-hub DevHub
 
           echo "Package version promoted to Released."
+
+      - name: Cleanup failed package version
+        if: ${{ failure() && steps.create_package.outputs.package_version_id != '' }}
+        run: |
+          PKG_VERSION_ID="${{ steps.create_package.outputs.package_version_id }}"
+          echo "Build failed. Attempting to delete package version ${PKG_VERSION_ID}..."
+
+          DELETE_RESULT=$(sf package version delete \
+            --package "$PKG_VERSION_ID" \
+            --target-dev-hub DevHub \
+            --no-prompt \
+            --json 2>&1) || true
+
+          SUCCESS=$(echo "$DELETE_RESULT" | jq -r '.status' 2>/dev/null)
+
+          if [ "$SUCCESS" == "0" ]; then
+            echo "Package version ${PKG_VERSION_ID} deleted successfully."
+          else
+            echo "::warning::Could not delete package version ${PKG_VERSION_ID}. It may have been promoted already."
+            echo "$DELETE_RESULT"
+          fi
 
   # -------------------------------------------------------------------------
   # TODO: Uncomment the jobs below when ready to enable QA installation
