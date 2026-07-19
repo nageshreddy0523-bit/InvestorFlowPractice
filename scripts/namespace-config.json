@@ -4,14 +4,14 @@
     {
       "description": "Replace namespace placeholder with actual namespace",
       "pattern": "__NAMESPACE__",
-      "replacement": "pipere",
+      "replacement": "pipeRE1",
       "flags": "g",
       "extensions": "cls,trigger,xml,js,html,cmp,page,component"
     },
     {
       "description": "Replace namespace prefix placeholder in references",
       "pattern": "__NAMESPACE_PREFIX__",
-      "replacement": "pipere__",
+      "replacement": "pipeRE1__",
       "flags": "g",
       "extensions": "cls,trigger,xml,js,html,cmp,page,component"
     }

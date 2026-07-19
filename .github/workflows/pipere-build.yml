@@ -3,36 +3,62 @@ name: PipeRE Build Automation
 on:
   workflow_dispatch:
     inputs:
+      package_type:
+        description: "Which package to build"
+        required: false
+        type: choice
+        default: "Managed"
+        options:
+          - "Managed"
+          - "Unlocked"
       skip_namespace_replacement:
         description: "Skip namespace replacement step"
         required: false
         type: boolean
         default: false
-      target_org_alias:
-        description: "Target QA org alias for installation"
+      # target_org_alias:
+      #   description: "Target QA org alias for installation"
+      #   required: false
+      #   type: string
+      #   default: "PipeRE-QA"
+      release_type:
+        description: "Package version release type"
         required: false
-        type: string
-        default: "PipeRE-QA"
-      promotion:
-        description: "Promote package version to Released after build"
+        type: choice
+        default: "Beta"
+        options:
+          - "Beta"
+          - "Released"
+      skip_ancestor_check:
+        description: "Skip ancestor version validation (use with caution)"
         required: false
         type: boolean
-        default: true
-      base_ref:
-        description: "Base git ref for delta comparison (branch, tag, or SHA)"
+        default: false
+      delta_scope:
+        description: "How far back to check for changes (for Apex tests)"
         required: false
-        type: string
-        default: "HEAD~1"
+        type: choice
+        default: "Last commit"
+        options:
+          - "Last commit"
+          - "Last 3 commits"
+          - "Last 5 commits"
+          - "Last 10 commits"
+          - "All changes from main"
       skip_apex_tests:
         description: "Skip delta Apex test execution"
         required: false
         type: boolean
         default: false
+      verify_package:
+        description: "Run post-build package verification (code coverage check)"
+        required: false
+        type: boolean
+        default: true
 
 env:
   SF_AUTOUPDATE_DISABLE: true
   SF_USE_GENERIC_UNIX_KEYCHAIN: true
-  PACKAGE_ID: ${{ vars.PIPERE_PACKAGE_ID }}
   DEVHUB_USERNAME: ${{ vars.SF_DEVHUB_USERNAME }}
   QA_USERNAME: ${{ vars.SF_QA_USERNAME }}
 
@@ -46,6 +72,17 @@ jobs:
       install_url: ${{ steps.create_package.outputs.install_url }}
 
     steps:
+      - name: Resolve Package ID
+        id: resolve_pkg
+        run: |
+          if [ "${{ github.event.inputs.package_type }}" == "Unlocked" ]; then
+            echo "package_id=${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}" >> "$GITHUB_OUTPUT"
+            echo "Selected Unlocked package: ${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}"
+          else
+            echo "package_id=${{ vars.PIPERE_PACKAGE_ID }}" >> "$GITHUB_OUTPUT"
+            echo "Selected Managed package: ${{ vars.PIPERE_PACKAGE_ID }}"
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -96,8 +133,17 @@ jobs:
         if: ${{ github.event.inputs.skip_apex_tests != 'true' }}
         id: sgd
         run: |
-          BASE_REF="${{ github.event.inputs.base_ref }}"
-          echo "Generating delta between ${BASE_REF} and HEAD..."
+          SCOPE="${{ github.event.inputs.delta_scope }}"
+          case "$SCOPE" in
+            "Last commit")       BASE_REF="HEAD~1" ;;
+            "Last 3 commits")    BASE_REF="HEAD~3" ;;
+            "Last 5 commits")    BASE_REF="HEAD~5" ;;
+            "Last 10 commits")   BASE_REF="HEAD~10" ;;
+            "All changes from main") BASE_REF="origin/main" ;;
+            *)                   BASE_REF="HEAD~1" ;;
+          esac
+
+          echo "Delta scope: ${SCOPE} (comparing ${BASE_REF} to HEAD)"
 
           mkdir -p delta
 
@@ -120,41 +166,31 @@ jobs:
         if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.sgd.outputs.has_delta == 'true' }}
         id: find_tests
         run: |
+          shopt -s nullglob
           TEST_CLASSES=""
 
           if [ -d "delta/force-app/main/default/classes" ]; then
             for cls_file in delta/force-app/main/default/classes/*Test*.cls delta/force-app/main/default/classes/*_Test.cls; do
-              if [ -f "$cls_file" ]; then
-                CLASS_NAME=$(basename "$cls_file" .cls)
-                if [ -n "$TEST_CLASSES" ]; then
-                  TEST_CLASSES="${TEST_CLASSES},${CLASS_NAME}"
-                else
-                  TEST_CLASSES="${CLASS_NAME}"
-                fi
-              fi
+              CLASS_NAME=$(basename "$cls_file" .cls)
+              TEST_CLASSES="${TEST_CLASSES} ${CLASS_NAME}"
             done
           fi
 
-          if [ -z "$TEST_CLASSES" ]; then
+          if [ -z "$(echo "$TEST_CLASSES" | xargs)" ]; then
             echo "No Apex test classes found in delta. Scanning for related tests..."
 
-            for cls_file in delta/force-app/main/default/classes/*.cls 2>/dev/null; do
-              [ -f "$cls_file" ] || continue
+            for cls_file in delta/force-app/main/default/classes/*.cls; do
               CLASS_NAME=$(basename "$cls_file" .cls)
 
               for test_pattern in "${CLASS_NAME}Test" "${CLASS_NAME}_Test" "Test${CLASS_NAME}"; do
                 if [ -f "force-app/main/default/classes/${test_pattern}.cls" ]; then
-                  if [ -n "$TEST_CLASSES" ]; then
-                    TEST_CLASSES="${TEST_CLASSES},${test_pattern}"
-                  else
-                    TEST_CLASSES="${test_pattern}"
-                  fi
+                  TEST_CLASSES="${TEST_CLASSES} ${test_pattern}"
                 fi
               done
             done
           fi
 
-          TEST_CLASSES=$(echo "$TEST_CLASSES" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+          TEST_CLASSES=$(echo "$TEST_CLASSES" | xargs -n1 | sort -u | xargs)
 
           echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
 
@@ -177,7 +213,7 @@ jobs:
             --target-org DevHub \
             --dry-run \
             --test-level RunSpecifiedTests \
-            --tests "$TEST_CLASSES" \
+            --tests $TEST_CLASSES \
             --wait 30
 
           echo "All Apex tests passed."
@@ -209,6 +245,7 @@ jobs:
         id: calc_version
         run: |
           chmod +x ./scripts/calculate-version.sh
+          PACKAGE_ID="${{ steps.resolve_pkg.outputs.package_id }}"
           VERSION=$(./scripts/calculate-version.sh "$PACKAGE_ID" "$DEVHUB_USERNAME")
           echo "version_number=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Calculated version: $VERSION"
@@ -218,12 +255,18 @@ jobs:
         run: |
           echo "Building package version ${{ steps.calc_version.outputs.version_number }}..."
 
+          ANCESTOR_FLAG=""
+          if [ "${{ github.event.inputs.skip_ancestor_check }}" == "true" ]; then
+            ANCESTOR_FLAG="--skip-ancestor-check"
+          fi
+
           BUILD_RESULT=$(sf package version create \
-            --package "$PACKAGE_ID" \
+            --package "${{ steps.resolve_pkg.outputs.package_id }}" \
             --installation-key-bypass \
             --wait 60 \
             --version-number "${{ steps.calc_version.outputs.version_number }}" \
             --code-coverage \
+            $ANCESTOR_FLAG \
             --target-dev-hub DevHub \
             --json 2>&1) || true
 
@@ -244,8 +287,37 @@ jobs:
           echo "Package Version ID: $SUBSCRIBER_PKG_VERSION_ID"
           echo "Install URL: $INSTALL_URL"
 
+      - name: Verify Package Version
+        if: ${{ github.event.inputs.verify_package == 'true' }}
+        run: |
+          echo "Verifying package version ${{ steps.create_package.outputs.package_version_id }}..."
+
+          PKG_INFO=$(sf package version report \
+            --package "${{ steps.create_package.outputs.package_version_id }}" \
+            --target-dev-hub DevHub \
+            --json)
+
+          echo "$PKG_INFO" | jq '.'
+
+          STATUS=$(echo "$PKG_INFO" | jq -r '.result.ValidationSkipped')
+          CODE_COV=$(echo "$PKG_INFO" | jq -r '.result.CodeCoverage.apexCodeCoveragePercentage // "N/A"')
+          HAS_PASSED=$(echo "$PKG_INFO" | jq -r '.result.HasPassedCodeCoverageCheck')
+
+          echo "=== Package Version Verification ==="
+          echo "Version ID:     ${{ steps.create_package.outputs.package_version_id }}"
+          echo "Code Coverage:  ${CODE_COV}%"
+          echo "Coverage Check: ${HAS_PASSED}"
+          echo "Validation Skipped: ${STATUS}"
+
+          if [ "$HAS_PASSED" == "false" ]; then
+            echo "::error::Package version failed code coverage check (${CODE_COV}% — minimum 75% required)"
+            exit 1
+          fi
+
+          echo "Package version verified successfully."
+
       - name: Promote Package Version
-        if: ${{ github.event.inputs.promotion == 'true' }}
+        if: ${{ github.event.inputs.release_type == 'Released' }}
         run: |
           sf package version promote \
             --package "${{ steps.create_package.outputs.package_version_id }}" \
@@ -254,147 +326,152 @@ jobs:
 
           echo "Package version promoted to Released."
 
-  install-qa:
-    name: Install to PipeRE QA
-    needs: build-package
-    runs-on: ubuntu-latest
-    if: ${{ needs.build-package.outputs.package_version_id != '' }}
+  # -------------------------------------------------------------------------
+  # TODO: Uncomment the jobs below when ready to enable QA installation
+  #       and Slack notifications.
+  # -------------------------------------------------------------------------
 
-    steps:
-      - name: Install Salesforce CLI
-        run: |
-          npm install @salesforce/cli -g
-          sf --version
+  # install-qa:
+  #   name: Install to PipeRE QA
+  #   needs: build-package
+  #   runs-on: ubuntu-latest
+  #   if: ${{ needs.build-package.outputs.package_version_id != '' }}
+  #
+  #   steps:
+  #     - name: Install Salesforce CLI
+  #       run: |
+  #         npm install @salesforce/cli -g
+  #         sf --version
+  #
+  #     - name: Authenticate to QA Org
+  #       env:
+  #         SF_QA_JWT_KEY: ${{ secrets.SF_QA_JWT_KEY }}
+  #         SF_QA_CONSUMER_KEY: ${{ secrets.SF_QA_CONSUMER_KEY }}
+  #         SF_QA_URL: ${{ vars.SF_QA_URL }}
+  #       run: |
+  #         echo "$SF_QA_JWT_KEY" > ./server.key
+  #         chmod 600 ./server.key
+  #         sf org login jwt \
+  #           --username "$QA_USERNAME" \
+  #           --client-id "$SF_QA_CONSUMER_KEY" \
+  #           --jwt-key-file ./server.key \
+  #           --instance-url "$SF_QA_URL" \
+  #           --alias "${{ github.event.inputs.target_org_alias }}"
+  #         rm -f ./server.key
+  #
+  #     - name: Install Package in QA Org
+  #       run: |
+  #         echo "Installing package ${{ needs.build-package.outputs.package_version_id }} into QA org..."
+  #
+  #         sf package install \
+  #           --package "${{ needs.build-package.outputs.package_version_id }}" \
+  #           --target-org "${{ github.event.inputs.target_org_alias }}" \
+  #           --wait 20 \
+  #           --publish-wait 10 \
+  #           --no-prompt
+  #
+  #         echo "Package installed successfully."
 
-      - name: Authenticate to QA Org
-        env:
-          SF_QA_JWT_KEY: ${{ secrets.SF_QA_JWT_KEY }}
-          SF_QA_CONSUMER_KEY: ${{ secrets.SF_QA_CONSUMER_KEY }}
-          SF_QA_URL: ${{ vars.SF_QA_URL }}
-        run: |
-          echo "$SF_QA_JWT_KEY" > ./server.key
-          chmod 600 ./server.key
-          sf org login jwt \
-            --username "$QA_USERNAME" \
-            --client-id "$SF_QA_CONSUMER_KEY" \
-            --jwt-key-file ./server.key \
-            --instance-url "$SF_QA_URL" \
-            --alias "${{ github.event.inputs.target_org_alias }}"
-          rm -f ./server.key
+  # notify-success:
+  #   name: Notify Slack (Success)
+  #   needs: [build-package, install-qa]
+  #   runs-on: ubuntu-latest
+  #   if: ${{ success() }}
+  #
+  #   steps:
+  #     - name: Post to release-versions Slack channel
+  #       env:
+  #         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+  #       run: |
+  #         VERSION="${{ needs.build-package.outputs.version_number }}"
+  #         INSTALL_URL="${{ needs.build-package.outputs.install_url }}"
+  #         PKG_VERSION_ID="${{ needs.build-package.outputs.package_version_id }}"
+  #
+  #         MESSAGE="PipeRE ${VERSION} ${INSTALL_URL}"
+  #
+  #         curl -s -X POST https://slack.com/api/chat.postMessage \
+  #           -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+  #           -H "Content-Type: application/json" \
+  #           -d "$(jq -n \
+  #             --arg channel "${{ vars.SLACK_RELEASE_VERSIONS_CHANNEL_ID }}" \
+  #             --arg text "$MESSAGE" \
+  #             --arg version "$VERSION" \
+  #             --arg url "$INSTALL_URL" \
+  #             --arg pkg_id "$PKG_VERSION_ID" \
+  #             '{
+  #               channel: $channel,
+  #               text: $text,
+  #               blocks: [
+  #                 {
+  #                   type: "section",
+  #                   text: {
+  #                     type: "mrkdwn",
+  #                     text: ("*PipeRE " + $version + "*\n<" + $url + "|Install Package>")
+  #                   }
+  #                 },
+  #                 {
+  #                   type: "context",
+  #                   elements: [
+  #                     {
+  #                       type: "mrkdwn",
+  #                       text: ("Package Version ID: `" + $pkg_id + "`")
+  #                     }
+  #                   ]
+  #                 }
+  #               ]
+  #             }')"
+  #
+  #         echo "Posted build notification to release-versions channel."
 
-      - name: Install Package in QA Org
-        run: |
-          echo "Installing package ${{ needs.build-package.outputs.package_version_id }} into QA org..."
-
-          sf package install \
-            --package "${{ needs.build-package.outputs.package_version_id }}" \
-            --target-org "${{ github.event.inputs.target_org_alias }}" \
-            --wait 20 \
-            --publish-wait 10 \
-            --no-prompt
-
-          echo "Package installed successfully."
-
-  notify-success:
-    name: Notify Slack (Success)
-    needs: [build-package, install-qa]
-    runs-on: ubuntu-latest
-    if: ${{ success() }}
-
-    steps:
-      - name: Post to release-versions Slack channel
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-        run: |
-          VERSION="${{ needs.build-package.outputs.version_number }}"
-          INSTALL_URL="${{ needs.build-package.outputs.install_url }}"
-          PKG_VERSION_ID="${{ needs.build-package.outputs.package_version_id }}"
-
-          MESSAGE="PipeRE ${VERSION} ${INSTALL_URL}"
-
-          curl -s -X POST https://slack.com/api/chat.postMessage \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg channel "${{ vars.SLACK_RELEASE_VERSIONS_CHANNEL_ID }}" \
-              --arg text "$MESSAGE" \
-              --arg version "$VERSION" \
-              --arg url "$INSTALL_URL" \
-              --arg pkg_id "$PKG_VERSION_ID" \
-              '{
-                channel: $channel,
-                text: $text,
-                blocks: [
-                  {
-                    type: "section",
-                    text: {
-                      type: "mrkdwn",
-                      text: ("*PipeRE " + $version + "*\n<" + $url + "|Install Package>")
-                    }
-                  },
-                  {
-                    type: "context",
-                    elements: [
-                      {
-                        type: "mrkdwn",
-                        text: ("Package Version ID: `" + $pkg_id + "`")
-                      }
-                    ]
-                  }
-                ]
-              }')"
-
-          echo "Posted build notification to release-versions channel."
-
-  notify-failure:
-    name: Notify Slack (Failure)
-    needs: [build-package, install-qa]
-    runs-on: ubuntu-latest
-    if: ${{ failure() }}
-
-    steps:
-      - name: Post failure to cowboy-beep-boop Slack channel
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-        run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-          curl -s -X POST https://slack.com/api/chat.postMessage \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n \
-              --arg channel "${{ vars.SLACK_COWBOY_CHANNEL_ID }}" \
-              --arg run_url "$RUN_URL" \
-              --arg actor "${{ github.actor }}" \
-              --arg ref "${{ github.ref_name }}" \
-              '{
-                channel: $channel,
-                text: ":x: PipeRE build failed. See workflow run for details.",
-                blocks: [
-                  {
-                    type: "section",
-                    text: {
-                      type: "mrkdwn",
-                      text: ":x: *PipeRE Build Failed*"
-                    }
-                  },
-                  {
-                    type: "section",
-                    text: {
-                      type: "mrkdwn",
-                      text: ("The PipeRE build pipeline has failed.\n<" + $run_url + "|View Workflow Run>")
-                    }
-                  },
-                  {
-                    type: "context",
-                    elements: [
-                      {
-                        type: "mrkdwn",
-                        text: ("Triggered by: *" + $actor + "* | Branch: `" + $ref + "`")
-                      }
-                    ]
-                  }
-                ]
-              }')"
-
-          echo "Posted failure notification to cowboy-beep-boop channel."
+  # notify-failure:
+  #   name: Notify Slack (Failure)
+  #   needs: [build-package, install-qa]
+  #   runs-on: ubuntu-latest
+  #   if: ${{ failure() }}
+  #
+  #   steps:
+  #     - name: Post failure to cowboy-beep-boop Slack channel
+  #       env:
+  #         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+  #       run: |
+  #         RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+  #
+  #         curl -s -X POST https://slack.com/api/chat.postMessage \
+  #           -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+  #           -H "Content-Type: application/json" \
+  #           -d "$(jq -n \
+  #             --arg channel "${{ vars.SLACK_COWBOY_CHANNEL_ID }}" \
+  #             --arg run_url "$RUN_URL" \
+  #             --arg actor "${{ github.actor }}" \
+  #             --arg ref "${{ github.ref_name }}" \
+  #             '{
+  #               channel: $channel,
+  #               text: ":x: PipeRE build failed. See workflow run for details.",
+  #               blocks: [
+  #                 {
+  #                   type: "section",
+  #                   text: {
+  #                     type: "mrkdwn",
+  #                     text: ":x: *PipeRE Build Failed*"
+  #                   }
+  #                 },
+  #                 {
+  #                   type: "section",
+  #                   text: {
+  #                     type: "mrkdwn",
+  #                     text: ("The PipeRE build pipeline has failed.\n<" + $run_url + "|View Workflow Run>")
+  #                   }
+  #                 },
+  #                 {
+  #                   type: "context",
+  #                   elements: [
+  #                     {
+  #                       type: "mrkdwn",
+  #                       text: ("Triggered by: *" + $actor + "* | Branch: `" + $ref + "`")
+  #                     }
+  #                   ]
+  #                 }
+  #               ]
+  #             }')"
+  #
+  #         echo "Posted failure notification to cowboy-beep-boop channel."

@@ -47,3 +47,7 @@ $RECYCLE.BIN/
 **/.venv/
 **/venv/
 server.key
+# SSL/JWT keys and certificates
+server.key
+server.crt
+server.csr

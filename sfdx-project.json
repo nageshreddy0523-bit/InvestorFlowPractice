@@ -7,6 +7,14 @@
       "default": true,
       "package": "FundraisingPackage",
       "versionDescription": ""
+    },
+    {
+      "versionName": "ver 0.1",
+      "versionNumber": "0.1.0.NEXT",
+      "path": "force-app",
+      "default": false,
+      "package": "PipeRE-Unlocked",
+      "versionDescription": ""
     }
   ],
   "name": "InvestorFlowPractice",
@@ -14,6 +22,7 @@
   "sfdcLoginUrl": "https://login.salesforce.com",
   "sourceApiVersion": "66.0",
   "packageAliases": {
-    "FundraisingPackage": "0HoWU0000002Z050AE"
+    "FundraisingPackage": "0HoWU0000002Z050AE",
+    "PipeRE-Unlocked": "0HoWU0000002euD0AQ"
   }
 }
