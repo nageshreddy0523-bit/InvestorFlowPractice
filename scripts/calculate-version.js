@@ -48,16 +48,21 @@ function getLatestReleasedVersion() {
       `sf package version list --packages "${PACKAGE_NAME}" --released --order-by CreatedDate --json`,
       { encoding: "utf8" }
     );
-  } catch (err) {
-    throw new Error(`Failed to query released package versions: ${err.message}`);
+  catch (err) {
+  console.error("Salesforce command failed.");
+
+  if (err.stdout) {
+    console.error("STDOUT:");
+    console.error(err.stdout.toString());
   }
 
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`Could not parse sf CLI output as JSON: ${err.message}`);
+  if (err.stderr) {
+    console.error("STDERR:");
+    console.error(err.stderr.toString());
   }
+
+  throw new Error(`Failed to query released package versions: ${err.message}`);
+}
 
   const results = parsed.result;
   if (!Array.isArray(results) || results.length === 0) {
