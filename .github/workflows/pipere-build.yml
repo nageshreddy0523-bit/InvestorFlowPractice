@@ -61,24 +61,36 @@ jobs:
       - name: Create package version
         id: create_package
         run: |
+          set +e
+
           CREATE_RESULT=$(sf package version create \
             --package "${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}" \
             --installation-key-bypass \
             --version-number "${{ steps.calc_version.outputs.version_number }}" \
             --code-coverage \
             --wait 0 \
-            --json)
+            --json 2>&1)
 
-          echo "$CREATE_RESULT" | jq '.'
+          COMMAND_EXIT_CODE=$?
+
+          set -e
+
+          echo "$CREATE_RESULT" | jq '.' 2>/dev/null || echo "$CREATE_RESULT"
+
+          if [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
+            echo "::error::Salesforce package version creation command failed"
+            exit "$COMMAND_EXIT_CODE"
+          fi
 
           REQUEST_ID=$(echo "$CREATE_RESULT" | jq -r '.result.Id // empty')
 
           if [ -z "$REQUEST_ID" ]; then
-            echo "::error::Package version create request failed to submit"
+            echo "::error::Package version create request ID was not returned"
             exit 1
           fi
 
           echo "request_id=$REQUEST_ID" >> "$GITHUB_OUTPUT"
+          echo "Package version create request submitted: $REQUEST_ID"
 
       - name: Wait for build completion
         id: wait_for_build
