@@ -62,6 +62,7 @@ jobs:
       # Kyle: Node.js approved over Ant, on the condition it's documented
       # well enough for the team to self-manage future updates.
       - name: Namespace replacement
+        if: ${{ false }}
         run: node ./scripts/namespace-replace.js
 
       # Step 7 — Calculate package version number (PIPE-6073)
