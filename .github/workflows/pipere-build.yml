@@ -95,28 +95,37 @@ jobs:
       - name: Wait for build completion
         id: wait_for_build
         run: |
-          REPORT_RESULT=$(sf package version create report \
-            --package-create-request-id "${{ steps.create_package.outputs.request_id }}" \
-            --wait 45 \
-            --json)
+          REQUEST_ID="${{ steps.create_package.outputs.request_id }}"
 
-          echo "$REPORT_RESULT" | jq '.'
+          for ATTEMPT in $(seq 1 45); do
+            echo "Checking package build status — attempt $ATTEMPT of 45"
 
-          STATUS=$(echo "$REPORT_RESULT" | jq -r '.result[0].Status // empty')
-          PACKAGE_VERSION_ID=$(echo "$REPORT_RESULT" | jq -r '.result[0].SubscriberPackageVersionId // empty')
+            REPORT_RESULT=$(sf package version create report \
+              --package-create-request-id "$REQUEST_ID" \
+              --json)
 
-          if [ "$STATUS" != "Success" ] || [ -z "$PACKAGE_VERSION_ID" ]; then
-            echo "::error::Build did not complete successfully (status: $STATUS)"
-            exit 1
-          fi
+            echo "$REPORT_RESULT" | jq '.'
 
-          echo "package_version_id=$PACKAGE_VERSION_ID" >> "$GITHUB_OUTPUT"
+            STATUS=$(echo "$REPORT_RESULT" | jq -r '.result.Status // empty')
+            PACKAGE_VERSION_ID=$(echo "$REPORT_RESULT" | jq -r '.result.SubscriberPackageVersionId // empty')
 
-      - name: Promote package version
-        run: |
-          sf package version promote \
-            --package "${{ steps.wait_for_build.outputs.package_version_id }}" \
-            --no-prompt
+            if [ "$STATUS" = "Success" ] && [ -n "$PACKAGE_VERSION_ID" ]; then
+              echo "package_version_id=$PACKAGE_VERSION_ID" >> "$GITHUB_OUTPUT"
+              echo "Package build completed successfully: $PACKAGE_VERSION_ID"
+              exit 0
+            fi
+
+            if [ "$STATUS" = "Error" ]; then
+              echo "::error::Package build failed"
+              exit 1
+            fi
+
+            echo "Current status: ${STATUS:-unknown}. Waiting 60 seconds..."
+            sleep 60
+          done
+
+          echo "::error::Package build did not finish within 45 minutes"
+          exit 1
 
       - name: Install to target orgs
         env:
