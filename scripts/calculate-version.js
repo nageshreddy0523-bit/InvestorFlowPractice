@@ -34,7 +34,11 @@
 
 const { execSync } = require("child_process");
 
-const PACKAGE_NAME = "PipeRE";
+const PACKAGE_ID = process.env.PACKAGE_ID;
+
+if (!PACKAGE_ID) {
+  throw new Error("PACKAGE_ID environment variable is missing.");
+}
 
 /**
  * Queries the corp org for released versions of the package, ordered by
@@ -47,9 +51,9 @@ function getLatestReleasedVersion() {
 
   try {
     raw = execSync(
-      `sf package version list --packages "${PACKAGE_NAME}" --released --order-by CreatedDate --json`,
-      { encoding: "utf8" }
-    );
+  `sf package version list --packages "${PACKAGE_ID}" --released --order-by CreatedDate --json`,
+  { encoding: "utf8" }
+);
 
     parsed = JSON.parse(raw);
   } catch (err) {

@@ -1,6 +1,5 @@
 name: PipeRE Build Automation
 
-# Manual trigger only — per PIPE-6071 ("Build Trigger: Manual")
 on:
   workflow_dispatch: {}
 
@@ -10,33 +9,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Step 1 — Checkout code
-      # Every job runs on a fresh, empty machine — this pulls the repo
-      # onto it so there's actually source to build.
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2 — Install Node.js
-      # Pinned below 24.17 — that version and above has a known bug
-      # with Salesforce CLI (per PIPE-6071 notes).
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24.16.0"
 
-      # Step 3 — Install Salesforce CLI
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli
 
-      # Step 4 — Verify tool versions
       - name: Verify tool versions
         run: |
           node --version
           sf --version
 
-      # Step 5 — Authenticate to Corp Org
-      # Requires: integration user + JWT connected app to exist in the
-      # corp org, and the cert/key retrieved from Keeper as a GitHub secret.
       - name: Authenticate to Corp Org
         env:
           SALESFORCE_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
@@ -57,44 +45,24 @@ jobs:
 
           rm -f ./server.key
 
-      # Step 6 — Namespace Replacements (PIPE-6072)
-      # Config-driven — see scripts/namespace-config.json. Confirmed by
-      # Kyle: Node.js approved over Ant, on the condition it's documented
-      # well enough for the team to self-manage future updates.
       - name: Namespace replacement
         if: ${{ false }}
         run: node ./scripts/namespace-replace.js
 
-      # Step 7 — Calculate package version number (PIPE-6073)
-      # NOTE: calculate-version.js currently implements a SPECULATIVE
-      # major.minor.patch scheme — Kyle and Julia have not yet confirmed
-      # this is the actual approach. PipeRE's real sfdx-project.json
-      # currently uses a different, 4-segment date-based format, so this
-      # may need to change once the real logic is confirmed.
       - name: Calculate package version
         id: calc_version
+        env:
+          PACKAGE_ID: ${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}
         run: |
           VERSION=$(node ./scripts/calculate-version.js)
           echo "version_number=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Calculated version: $VERSION"
 
-      # Step 8 — Build package (Create Package Version)
-      # --wait 0 means this returns immediately with a Package Version
-      # Create REQUEST ID, not a finished package — the build hasn't
-      # happened yet at this point, so SubscriberPackageVersionId is not
-      # yet populated here. That only becomes available once the build
-      # actually completes (see next step). --code-coverage is required
-      # here (not at promote) because coverage is calculated during build;
-      # promote later just checks the number that was recorded here.
-      # Salesforce requires >=75% to promote a 2GP package. No PR-
-      # validation steps (Snyk/Sonar/delta Apex tests) here — Kyle
-      # confirmed those are a separate, not-yet-configured story that
-      # should run earlier, at PR time.
       - name: Create package version
         id: create_package
         run: |
           CREATE_RESULT=$(sf package version create \
-            --package "PipeRE" \
+            --package "${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}" \
             --installation-key-bypass \
             --version-number "${{ steps.calc_version.outputs.version_number }}" \
             --code-coverage \
@@ -112,16 +80,11 @@ jobs:
 
           echo "request_id=$REQUEST_ID" >> "$GITHUB_OUTPUT"
 
-      # Step 9 — Wait for build to complete (~30-40 min), THEN get the
-      # real package version ID from the completed report. This is where
-      # SubscriberPackageVersionId actually becomes available — polling
-      # against the create-request ID from the previous step, not the
-      # package name, since that's what report expects.
       - name: Wait for build completion
         id: wait_for_build
         run: |
           REPORT_RESULT=$(sf package version create report \
-            --package-version-create-request-id "${{ steps.create_package.outputs.request_id }}" \
+            --package-create-request-id "${{ steps.create_package.outputs.request_id }}" \
             --wait 45 \
             --json)
 
@@ -137,30 +100,17 @@ jobs:
 
           echo "package_version_id=$PACKAGE_VERSION_ID" >> "$GITHUB_OUTPUT"
 
-      # Step 10 — Promote build to released
-      # No coverage flag here — that was already recorded at build time.
       - name: Promote package version
         run: |
           sf package version promote \
             --package "${{ steps.wait_for_build.outputs.package_version_id }}" \
             --no-prompt
 
-      # Step 11 — Install into target orgs (QA / demo / template)
-      # CONFIRMED IN SCRUM: Kyle wants this automated, not left as a manual
-      # "here's the install URL" handoff — this replaces the current
-      # manual click-and-wait process (10-15 min per org). Same JWT
-      # cert/connected app is reused for every org; only the username
-      # differs. Org list lives in a separate config file so adding a new
-      # org later is just a config change, not a script change.
       - name: Install to target orgs
         env:
-          TARGET_ORGS: ${{ vars.PIPERE_TARGET_ORGS }} # comma-separated usernames
+          TARGET_ORGS: ${{ vars.PIPERE_TARGET_ORGS }}
         run: node ./scripts/install-to-orgs.js "${{ steps.wait_for_build.outputs.package_version_id }}"
 
-      # Step 12 — Notify
-      # BLOCKED: notification mechanism (webhook / package record trigger /
-      # integration user) not yet decided. Email-based notifications have
-      # been broken for ~2 years and 2GP packages send no emails at all.
       - name: Notify
         run: |
           echo "TODO: post to #release-versions once notification method is decided"
