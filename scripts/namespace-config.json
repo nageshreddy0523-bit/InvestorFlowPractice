@@ -1,19 +1,8 @@
 {
-  "description": "Namespace replacement configuration for PipeRE package (PIPE-6072)",
-  "replacements": [
-    {
-      "description": "Replace namespace placeholder with actual namespace",
-      "pattern": "__NAMESPACE__",
-      "replacement": "pipeRE1",
-      "flags": "g",
-      "extensions": "cls,trigger,xml,js,html,cmp,page,component"
-    },
-    {
-      "description": "Replace namespace prefix placeholder in references",
-      "pattern": "__NAMESPACE_PREFIX__",
-      "replacement": "pipeRE1__",
-      "flags": "g",
-      "extensions": "cls,trigger,xml,js,html,cmp,page,component"
-    }
-  ]
+  "namespace": "IFLW",
+  "targetFiles": [
+    "force-app/main/default/flows/Template_Deal_Introduction_Send_Accept_Response.flow-meta.xml",
+    "force-app/main/default/flows/Template_Deal_Introduction_Send_Reject_Response.flow-meta.xml"
+  ],
+  "fieldsToNamespace": ["Error_Type__c", "Email_Send_Error__c"]
 }

@@ -1,477 +1,166 @@
 name: PipeRE Build Automation
 
+# Manual trigger only — per PIPE-6071 ("Build Trigger: Manual")
 on:
-  workflow_dispatch:
-    inputs:
-      package_type:
-        description: "Which package to build"
-        required: false
-        type: choice
-        default: "Managed"
-        options:
-          - "Managed"
-          - "Unlocked"
-      skip_namespace_replacement:
-        description: "Skip namespace replacement step"
-        required: false
-        type: boolean
-        default: false
-      # target_org_alias:
-      #   description: "Target QA org alias for installation"
-      #   required: false
-      #   type: string
-      #   default: "PipeRE-QA"
-      release_type:
-        description: "Package version release type"
-        required: false
-        type: choice
-        default: "Beta"
-        options:
-          - "Beta"
-          - "Released"
-      skip_ancestor_check:
-        description: "Skip ancestor version validation (use with caution)"
-        required: false
-        type: boolean
-        default: false
-      delta_scope:
-        description: "How far back to check for changes (for Apex tests)"
-        required: false
-        type: choice
-        default: "Last commit"
-        options:
-          - "Last commit"
-          - "Last 3 commits"
-          - "Last 5 commits"
-          - "Last 10 commits"
-          - "All changes from main"
-      skip_apex_tests:
-        description: "Skip delta Apex test execution"
-        required: false
-        type: boolean
-        default: false
-      verify_package:
-        description: "Run post-build package verification (code coverage check)"
-        required: false
-        type: boolean
-        default: true
-
-env:
-  SF_AUTOUPDATE_DISABLE: true
-  SF_USE_GENERIC_UNIX_KEYCHAIN: true
-  DEVHUB_USERNAME: ${{ vars.SF_DEVHUB_USERNAME }}
-  QA_USERNAME: ${{ vars.SF_QA_USERNAME }}
+  workflow_dispatch: {}
 
 jobs:
-  build-package:
-    name: PipeRE 2GP Build
+  build-and-install:
+    name: Build, Promote, and Install PipeRE
     runs-on: ubuntu-latest
-    outputs:
-      package_version_id: ${{ steps.create_package.outputs.package_version_id }}
-      version_number: ${{ steps.calc_version.outputs.version_number }}
-      install_url: ${{ steps.create_package.outputs.install_url }}
 
     steps:
-      - name: Resolve Package ID
-        id: resolve_pkg
-        run: |
-          if [ "${{ github.event.inputs.package_type }}" == "Unlocked" ]; then
-            echo "package_id=${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}" >> "$GITHUB_OUTPUT"
-            echo "Selected Unlocked package: ${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}"
-          else
-            echo "package_id=${{ vars.PIPERE_PACKAGE_ID }}" >> "$GITHUB_OUTPUT"
-            echo "Selected Managed package: ${{ vars.PIPERE_PACKAGE_ID }}"
-          fi
-
+      # Step 1 — Checkout code
+      # Every job runs on a fresh, empty machine — this pulls the repo
+      # onto it so there's actually source to build.
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          clean: true
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
 
-      # Node 24 is fine, but 24.17+ has a known bug with Salesforce CLI
+      # Step 2 — Install Node.js
+      # Pinned below 24.17 — that version and above has a known bug
+      # with Salesforce CLI (per PIPE-6071 notes).
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24.16.0"
 
+      # Step 3 — Install Salesforce CLI
       - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      # Step 4 — Verify tool versions
+      - name: Verify tool versions
         run: |
-          npm install @salesforce/cli -g
+          node --version
           sf --version
 
-      - name: Authenticate to DevHub
+      # Step 5 — Authenticate to Corp Org
+      # Requires: integration user + JWT connected app to exist in the
+      # corp org, and the cert/key retrieved from Keeper as a GitHub secret.
+      - name: Authenticate to Corp Org
         env:
-          SALESFORCE_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
-          SALESFORCE_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
-          SALESFORCE_DEVHUB_URL: ${{ vars.SF_DEVHUB_URL }}
+          SALESFORCE_JWT_KEY: ${{ secrets.CORP_ORG_JWT_KEY }}
+          SALESFORCE_CONSUMER_KEY: ${{ secrets.CORP_ORG_CONSUMER_KEY }}
+          SALESFORCE_DEVHUB_URL: ${{ vars.CORP_ORG_URL }}
+          CORP_ORG_USERNAME: ${{ vars.CORP_ORG_INTEGRATION_USER }}
         run: |
           echo "$SALESFORCE_JWT_KEY" > ./server.key
           chmod 600 ./server.key
+
           sf org login jwt \
-            --username "$DEVHUB_USERNAME" \
+            --username "$CORP_ORG_USERNAME" \
             --client-id "$SALESFORCE_CONSUMER_KEY" \
             --jwt-key-file ./server.key \
             --instance-url "$SALESFORCE_DEVHUB_URL" \
             --set-default-dev-hub \
-            --alias DevHub
-          rm -f ./server.key
-          sf org list
+            --alias CorpOrg
 
-      - name: Perform Namespace Replacements
-        if: ${{ github.event.inputs.skip_namespace_replacement != 'true' }}
+          rm -f ./server.key
+
+      # Step 6 — Namespace Replacements (PIPE-6072)
+      # Config-driven — see scripts/namespace-config.json. Confirmed by
+      # Kyle: Node.js approved over Ant, on the condition it's documented
+      # well enough for the team to self-manage future updates.
+      - name: Namespace replacement
         run: node ./scripts/namespace-replace.js
 
-      - name: Install sfdx-git-delta (SGD) plugin
-        if: ${{ github.event.inputs.skip_apex_tests != 'true' }}
-        run: |
-          echo "y" | sf plugins install sfdx-git-delta
-          sf plugins --core
-
-      - name: Generate delta package
-        if: ${{ github.event.inputs.skip_apex_tests != 'true' }}
-        id: sgd
-        run: |
-          SCOPE="${{ github.event.inputs.delta_scope }}"
-          case "$SCOPE" in
-            "Last commit")       BASE_REF="HEAD~1" ;;
-            "Last 3 commits")    BASE_REF="HEAD~3" ;;
-            "Last 5 commits")    BASE_REF="HEAD~5" ;;
-            "Last 10 commits")   BASE_REF="HEAD~10" ;;
-            "All changes from main") BASE_REF="origin/main" ;;
-            *)                   BASE_REF="HEAD~1" ;;
-          esac
-
-          echo "Delta scope: ${SCOPE} (comparing ${BASE_REF} to HEAD)"
-
-          mkdir -p delta
-
-          sf sgd:source:delta \
-            --from "$BASE_REF" \
-            --to HEAD \
-            --output delta \
-            --generate-delta
-
-          echo "=== Delta package.xml ==="
-          if [ -f "delta/package/package.xml" ]; then
-            cat delta/package/package.xml
-            echo "has_delta=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No changes detected in delta."
-            echo "has_delta=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Identify Apex test classes from delta
-        if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.sgd.outputs.has_delta == 'true' }}
-        id: find_tests
-        run: |
-          shopt -s nullglob
-          TEST_CLASSES=""
-
-          if [ -d "delta/force-app/main/default/classes" ]; then
-            for cls_file in delta/force-app/main/default/classes/*Test*.cls delta/force-app/main/default/classes/*_Test.cls; do
-              CLASS_NAME=$(basename "$cls_file" .cls)
-              TEST_CLASSES="${TEST_CLASSES} ${CLASS_NAME}"
-            done
-          fi
-
-          if [ -z "$(echo "$TEST_CLASSES" | xargs)" ]; then
-            echo "No Apex test classes found in delta. Scanning for related tests..."
-
-            for cls_file in delta/force-app/main/default/classes/*.cls; do
-              CLASS_NAME=$(basename "$cls_file" .cls)
-
-              for test_pattern in "${CLASS_NAME}Test" "${CLASS_NAME}_Test" "Test${CLASS_NAME}"; do
-                if [ -f "force-app/main/default/classes/${test_pattern}.cls" ]; then
-                  TEST_CLASSES="${TEST_CLASSES} ${test_pattern}"
-                fi
-              done
-            done
-          fi
-
-          TEST_CLASSES=$(echo "$TEST_CLASSES" | xargs -n1 | sort -u | xargs)
-
-          echo "test_classes=$TEST_CLASSES" >> "$GITHUB_OUTPUT"
-
-          if [ -n "$TEST_CLASSES" ]; then
-            echo "has_tests=true" >> "$GITHUB_OUTPUT"
-            echo "Apex test classes to run: $TEST_CLASSES"
-          else
-            echo "has_tests=false" >> "$GITHUB_OUTPUT"
-            echo "No related Apex test classes found."
-          fi
-
-      - name: Run Apex tests (delta validation)
-        if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.find_tests.outputs.has_tests == 'true' }}
-        run: |
-          TEST_CLASSES="${{ steps.find_tests.outputs.test_classes }}"
-          echo "Running Apex tests: $TEST_CLASSES"
-
-          sf project deploy start \
-            --manifest delta/package/package.xml \
-            --target-org DevHub \
-            --dry-run \
-            --test-level RunSpecifiedTests \
-            --tests $TEST_CLASSES \
-            --wait 30
-
-          echo "All Apex tests passed."
-
-      - name: Validate Package Source
-        if: ${{ github.event.inputs.skip_apex_tests != 'true' && steps.sgd.outputs.has_delta == 'true' }}
-        run: |
-          TEST_LEVEL="NoTestRun"
-          TEST_ARGS=""
-
-          if [ "${{ steps.find_tests.outputs.has_tests }}" == "true" ]; then
-            TEST_LEVEL="RunSpecifiedTests"
-            TEST_ARGS="--tests ${{ steps.find_tests.outputs.test_classes }}"
-          fi
-
-          echo "Validating full package source (test level: ${TEST_LEVEL})..."
-
-          sf project deploy start \
-            --source-dir force-app \
-            --target-org DevHub \
-            --dry-run \
-            --test-level "$TEST_LEVEL" \
-            $TEST_ARGS \
-            --wait 30
-
-          echo "Package source validation passed."
-
-      - name: Calculate Package Version Number
+      # Step 7 — Calculate package version number (PIPE-6073)
+      # NOTE: calculate-version.js currently implements a SPECULATIVE
+      # major.minor.patch scheme — Kyle and Julia have not yet confirmed
+      # this is the actual approach. PipeRE's real sfdx-project.json
+      # currently uses a different, 4-segment date-based format, so this
+      # may need to change once the real logic is confirmed.
+      - name: Calculate package version
         id: calc_version
         run: |
-          chmod +x ./scripts/calculate-version.sh
-          PACKAGE_ID="${{ steps.resolve_pkg.outputs.package_id }}"
-          VERSION=$(./scripts/calculate-version.sh "$PACKAGE_ID" "$DEVHUB_USERNAME")
+          VERSION=$(node ./scripts/calculate-version.js)
           echo "version_number=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Calculated version: $VERSION"
 
-      - name: Create Package Version (Build)
+      # Step 8 — Build package (Create Package Version)
+      # --wait 0 means this returns immediately with a Package Version
+      # Create REQUEST ID, not a finished package — the build hasn't
+      # happened yet at this point, so SubscriberPackageVersionId is not
+      # yet populated here. That only becomes available once the build
+      # actually completes (see next step). --code-coverage is required
+      # here (not at promote) because coverage is calculated during build;
+      # promote later just checks the number that was recorded here.
+      # Salesforce requires >=75% to promote a 2GP package. No PR-
+      # validation steps (Snyk/Sonar/delta Apex tests) here — Kyle
+      # confirmed those are a separate, not-yet-configured story that
+      # should run earlier, at PR time.
+      - name: Create package version
         id: create_package
         run: |
-          echo "Building package version ${{ steps.calc_version.outputs.version_number }}..."
-
-          ANCESTOR_FLAG=""
-          if [ "${{ github.event.inputs.skip_ancestor_check }}" == "true" ]; then
-            ANCESTOR_FLAG="--skip-ancestor-check"
-          fi
-
-          BUILD_RESULT=$(sf package version create \
-            --package "${{ steps.resolve_pkg.outputs.package_id }}" \
+          CREATE_RESULT=$(sf package version create \
+            --package "PipeRE" \
             --installation-key-bypass \
-            --wait 60 \
             --version-number "${{ steps.calc_version.outputs.version_number }}" \
             --code-coverage \
-            $ANCESTOR_FLAG \
-            --target-dev-hub DevHub \
-            --json 2>&1) || true
-
-          echo "$BUILD_RESULT" | jq '.' || echo "$BUILD_RESULT"
-
-          SUBSCRIBER_PKG_VERSION_ID=$(echo "$BUILD_RESULT" | jq -r '.result.SubscriberPackageVersionId // empty')
-
-          if [ -z "$SUBSCRIBER_PKG_VERSION_ID" ]; then
-            echo "::error::Package version creation failed"
-            echo "$BUILD_RESULT"
-            exit 1
-          fi
-
-          INSTALL_URL="https://login.salesforce.com/packaging/installPackage.apexp?p0=${SUBSCRIBER_PKG_VERSION_ID}"
-
-          echo "package_version_id=$SUBSCRIBER_PKG_VERSION_ID" >> "$GITHUB_OUTPUT"
-          echo "install_url=$INSTALL_URL" >> "$GITHUB_OUTPUT"
-          echo "Package Version ID: $SUBSCRIBER_PKG_VERSION_ID"
-          echo "Install URL: $INSTALL_URL"
-
-      - name: Verify Package Version
-        if: ${{ github.event.inputs.verify_package == 'true' }}
-        run: |
-          echo "Verifying package version ${{ steps.create_package.outputs.package_version_id }}..."
-
-          PKG_INFO=$(sf package version report \
-            --package "${{ steps.create_package.outputs.package_version_id }}" \
-            --target-dev-hub DevHub \
+            --wait 0 \
             --json)
 
-          echo "$PKG_INFO" | jq '.'
+          echo "$CREATE_RESULT" | jq '.'
 
-          STATUS=$(echo "$PKG_INFO" | jq -r '.result.ValidationSkipped')
-          CODE_COV=$(echo "$PKG_INFO" | jq -r '.result.CodeCoverage.apexCodeCoveragePercentage // "N/A"')
-          HAS_PASSED=$(echo "$PKG_INFO" | jq -r '.result.HasPassedCodeCoverageCheck')
+          REQUEST_ID=$(echo "$CREATE_RESULT" | jq -r '.result.Id // empty')
 
-          echo "=== Package Version Verification ==="
-          echo "Version ID:     ${{ steps.create_package.outputs.package_version_id }}"
-          echo "Code Coverage:  ${CODE_COV}%"
-          echo "Coverage Check: ${HAS_PASSED}"
-          echo "Validation Skipped: ${STATUS}"
-
-          if [ "$HAS_PASSED" == "false" ]; then
-            echo "::error::Package version failed code coverage check (${CODE_COV}% — minimum 75% required)"
+          if [ -z "$REQUEST_ID" ]; then
+            echo "::error::Package version create request failed to submit"
             exit 1
           fi
 
-          echo "Package version verified successfully."
+          echo "request_id=$REQUEST_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Promote Package Version
-        if: ${{ github.event.inputs.release_type == 'Released' }}
+      # Step 9 — Wait for build to complete (~30-40 min), THEN get the
+      # real package version ID from the completed report. This is where
+      # SubscriberPackageVersionId actually becomes available — polling
+      # against the create-request ID from the previous step, not the
+      # package name, since that's what report expects.
+      - name: Wait for build completion
+        id: wait_for_build
+        run: |
+          REPORT_RESULT=$(sf package version create report \
+            --package-version-create-request-id "${{ steps.create_package.outputs.request_id }}" \
+            --wait 45 \
+            --json)
+
+          echo "$REPORT_RESULT" | jq '.'
+
+          STATUS=$(echo "$REPORT_RESULT" | jq -r '.result[0].Status // empty')
+          PACKAGE_VERSION_ID=$(echo "$REPORT_RESULT" | jq -r '.result[0].SubscriberPackageVersionId // empty')
+
+          if [ "$STATUS" != "Success" ] || [ -z "$PACKAGE_VERSION_ID" ]; then
+            echo "::error::Build did not complete successfully (status: $STATUS)"
+            exit 1
+          fi
+
+          echo "package_version_id=$PACKAGE_VERSION_ID" >> "$GITHUB_OUTPUT"
+
+      # Step 10 — Promote build to released
+      # No coverage flag here — that was already recorded at build time.
+      - name: Promote package version
         run: |
           sf package version promote \
-            --package "${{ steps.create_package.outputs.package_version_id }}" \
-            --no-prompt \
-            --target-dev-hub DevHub
+            --package "${{ steps.wait_for_build.outputs.package_version_id }}" \
+            --no-prompt
 
-          echo "Package version promoted to Released."
+      # Step 11 — Install into target orgs (QA / demo / template)
+      # CONFIRMED IN SCRUM: Kyle wants this automated, not left as a manual
+      # "here's the install URL" handoff — this replaces the current
+      # manual click-and-wait process (10-15 min per org). Same JWT
+      # cert/connected app is reused for every org; only the username
+      # differs. Org list lives in a separate config file so adding a new
+      # org later is just a config change, not a script change.
+      - name: Install to target orgs
+        env:
+          TARGET_ORGS: ${{ vars.PIPERE_TARGET_ORGS }} # comma-separated usernames
+        run: node ./scripts/install-to-orgs.js "${{ steps.wait_for_build.outputs.package_version_id }}"
 
-  # -------------------------------------------------------------------------
-  # TODO: Uncomment the jobs below when ready to enable QA installation
-  #       and Slack notifications.
-  # -------------------------------------------------------------------------
-
-  # install-qa:
-  #   name: Install to PipeRE QA
-  #   needs: build-package
-  #   runs-on: ubuntu-latest
-  #   if: ${{ needs.build-package.outputs.package_version_id != '' }}
-  #
-  #   steps:
-  #     - name: Install Salesforce CLI
-  #       run: |
-  #         npm install @salesforce/cli -g
-  #         sf --version
-  #
-  #     - name: Authenticate to QA Org
-  #       env:
-  #         SF_QA_JWT_KEY: ${{ secrets.SF_QA_JWT_KEY }}
-  #         SF_QA_CONSUMER_KEY: ${{ secrets.SF_QA_CONSUMER_KEY }}
-  #         SF_QA_URL: ${{ vars.SF_QA_URL }}
-  #       run: |
-  #         echo "$SF_QA_JWT_KEY" > ./server.key
-  #         chmod 600 ./server.key
-  #         sf org login jwt \
-  #           --username "$QA_USERNAME" \
-  #           --client-id "$SF_QA_CONSUMER_KEY" \
-  #           --jwt-key-file ./server.key \
-  #           --instance-url "$SF_QA_URL" \
-  #           --alias "${{ github.event.inputs.target_org_alias }}"
-  #         rm -f ./server.key
-  #
-  #     - name: Install Package in QA Org
-  #       run: |
-  #         echo "Installing package ${{ needs.build-package.outputs.package_version_id }} into QA org..."
-  #
-  #         sf package install \
-  #           --package "${{ needs.build-package.outputs.package_version_id }}" \
-  #           --target-org "${{ github.event.inputs.target_org_alias }}" \
-  #           --wait 20 \
-  #           --publish-wait 10 \
-  #           --no-prompt
-  #
-  #         echo "Package installed successfully."
-
-  # notify-success:
-  #   name: Notify Slack (Success)
-  #   needs: [build-package, install-qa]
-  #   runs-on: ubuntu-latest
-  #   if: ${{ success() }}
-  #
-  #   steps:
-  #     - name: Post to release-versions Slack channel
-  #       env:
-  #         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-  #       run: |
-  #         VERSION="${{ needs.build-package.outputs.version_number }}"
-  #         INSTALL_URL="${{ needs.build-package.outputs.install_url }}"
-  #         PKG_VERSION_ID="${{ needs.build-package.outputs.package_version_id }}"
-  #
-  #         MESSAGE="PipeRE ${VERSION} ${INSTALL_URL}"
-  #
-  #         curl -s -X POST https://slack.com/api/chat.postMessage \
-  #           -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-  #           -H "Content-Type: application/json" \
-  #           -d "$(jq -n \
-  #             --arg channel "${{ vars.SLACK_RELEASE_VERSIONS_CHANNEL_ID }}" \
-  #             --arg text "$MESSAGE" \
-  #             --arg version "$VERSION" \
-  #             --arg url "$INSTALL_URL" \
-  #             --arg pkg_id "$PKG_VERSION_ID" \
-  #             '{
-  #               channel: $channel,
-  #               text: $text,
-  #               blocks: [
-  #                 {
-  #                   type: "section",
-  #                   text: {
-  #                     type: "mrkdwn",
-  #                     text: ("*PipeRE " + $version + "*\n<" + $url + "|Install Package>")
-  #                   }
-  #                 },
-  #                 {
-  #                   type: "context",
-  #                   elements: [
-  #                     {
-  #                       type: "mrkdwn",
-  #                       text: ("Package Version ID: `" + $pkg_id + "`")
-  #                     }
-  #                   ]
-  #                 }
-  #               ]
-  #             }')"
-  #
-  #         echo "Posted build notification to release-versions channel."
-
-  # notify-failure:
-  #   name: Notify Slack (Failure)
-  #   needs: [build-package, install-qa]
-  #   runs-on: ubuntu-latest
-  #   if: ${{ failure() }}
-  #
-  #   steps:
-  #     - name: Post failure to cowboy-beep-boop Slack channel
-  #       env:
-  #         SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-  #       run: |
-  #         RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-  #
-  #         curl -s -X POST https://slack.com/api/chat.postMessage \
-  #           -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-  #           -H "Content-Type: application/json" \
-  #           -d "$(jq -n \
-  #             --arg channel "${{ vars.SLACK_COWBOY_CHANNEL_ID }}" \
-  #             --arg run_url "$RUN_URL" \
-  #             --arg actor "${{ github.actor }}" \
-  #             --arg ref "${{ github.ref_name }}" \
-  #             '{
-  #               channel: $channel,
-  #               text: ":x: PipeRE build failed. See workflow run for details.",
-  #               blocks: [
-  #                 {
-  #                   type: "section",
-  #                   text: {
-  #                     type: "mrkdwn",
-  #                     text: ":x: *PipeRE Build Failed*"
-  #                   }
-  #                 },
-  #                 {
-  #                   type: "section",
-  #                   text: {
-  #                     type: "mrkdwn",
-  #                     text: ("The PipeRE build pipeline has failed.\n<" + $run_url + "|View Workflow Run>")
-  #                   }
-  #                 },
-  #                 {
-  #                   type: "context",
-  #                   elements: [
-  #                     {
-  #                       type: "mrkdwn",
-  #                       text: ("Triggered by: *" + $actor + "* | Branch: `" + $ref + "`")
-  #                     }
-  #                   ]
-  #                 }
-  #               ]
-  #             }')"
-  #
-  #         echo "Posted failure notification to cowboy-beep-boop channel."
+      # Step 12 — Notify
+      # BLOCKED: notification mechanism (webhook / package record trigger /
+      # integration user) not yet decided. Email-based notifications have
+      # been broken for ~2 years and 2GP packages send no emails at all.
+      - name: Notify
+        run: |
+          echo "TODO: post to #release-versions once notification method is decided"
+          echo "Message format: 'PipeRE <version> <install URL>'"
