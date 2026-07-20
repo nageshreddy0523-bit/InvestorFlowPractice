@@ -92,9 +92,9 @@ jobs:
           echo "request_id=$REQUEST_ID" >> "$GITHUB_OUTPUT"
           echo "Package version create request submitted: $REQUEST_ID"
 
-      - name: Wait for build completion
-        id: wait_for_build
-        run: |
+      -  name: Wait for build completion
+         id: wait_for_build
+         run: |
           REQUEST_ID="${{ steps.create_package.outputs.request_id }}"
 
           for ATTEMPT in $(seq 1 45); do
@@ -106,8 +106,9 @@ jobs:
 
             echo "$REPORT_RESULT" | jq '.'
 
-            STATUS=$(echo "$REPORT_RESULT" | jq -r '.result.Status // empty')
-            PACKAGE_VERSION_ID=$(echo "$REPORT_RESULT" | jq -r '.result.SubscriberPackageVersionId // empty')
+            STATUS=$(echo "$REPORT_RESULT" | jq -r '.result[0].Status // empty')
+            PACKAGE_VERSION_ID=$(echo "$REPORT_RESULT" | jq -r '.result[0].SubscriberPackageVersionId // empty')
+            ERRORS=$(echo "$REPORT_RESULT" | jq -r '.result[0].Error[]? // empty')
 
             if [ "$STATUS" = "Success" ] && [ -n "$PACKAGE_VERSION_ID" ]; then
               echo "package_version_id=$PACKAGE_VERSION_ID" >> "$GITHUB_OUTPUT"
@@ -117,6 +118,7 @@ jobs:
 
             if [ "$STATUS" = "Error" ]; then
               echo "::error::Package build failed"
+              echo "$ERRORS"
               exit 1
             fi
 
