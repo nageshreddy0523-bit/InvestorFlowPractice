@@ -39,10 +39,10 @@ jobs:
       # corp org, and the cert/key retrieved from Keeper as a GitHub secret.
       - name: Authenticate to Corp Org
         env:
-          SALESFORCE_JWT_KEY: ${{ secrets.CORP_ORG_JWT_KEY }}
-          SALESFORCE_CONSUMER_KEY: ${{ secrets.CORP_ORG_CONSUMER_KEY }}
-          SALESFORCE_DEVHUB_URL: ${{ vars.CORP_ORG_URL }}
-          CORP_ORG_USERNAME: ${{ vars.CORP_ORG_INTEGRATION_USER }}
+          SALESFORCE_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
+          SALESFORCE_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
+          SALESFORCE_DEVHUB_URL: ${{ vars.SF_DEVHUB_URL }}
+          CORP_ORG_USERNAME: ${{ vars.SF_DEVHUB_USERNAME }}
         run: |
           echo "$SALESFORCE_JWT_KEY" > ./server.key
           chmod 600 ./server.key
