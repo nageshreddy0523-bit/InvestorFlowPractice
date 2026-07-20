@@ -120,11 +120,11 @@ function parseVersion(versionString) {
  */
 function calculateNextVersion(latestVersionString) {
   if (latestVersionString === null) {
-    return "1.0.0";
+     return "1.0.0.NEXT";
   }
 
   const { major, minor, patch } = parseVersion(latestVersionString);
-  return `${major}.${minor}.${patch + 1}`;
+  return `${major}.${minor}.${patch + 1}.NEXT`;
 }
 
 function main() {
