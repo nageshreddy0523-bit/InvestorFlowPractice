@@ -4,5 +4,8 @@
     "force-app/main/default/flows/Template_Deal_Introduction_Send_Accept_Response.flow-meta.xml",
     "force-app/main/default/flows/Template_Deal_Introduction_Send_Reject_Response.flow-meta.xml"
   ],
-  "fieldsToNamespace": ["Error_Type__c", "Email_Send_Error__c"]
+  "fieldsToNamespace": [
+    "Error_Type__c",
+    "Email_Send_Error__c"
+  ]
 }
