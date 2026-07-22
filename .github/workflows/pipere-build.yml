@@ -46,7 +46,6 @@ jobs:
           rm -f ./server.key
 
       - name: Namespace replacement
-        if: ${{ false }}
         run: node ./scripts/namespace-replace.js
 
       - name: Calculate package version
