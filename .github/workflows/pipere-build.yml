@@ -18,7 +18,7 @@ jobs:
       actions: write   # needed to trigger check-package-version.yml
     defaults:
       run:
-        working-directory: 
+        working-directory: InvestorFlowPractice
 
     steps:
       # 0. Checkout repo
