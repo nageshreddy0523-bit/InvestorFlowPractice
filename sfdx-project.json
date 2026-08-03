@@ -15,6 +15,14 @@
       "default": false,
       "package": "PipeRE-Unlocked",
       "versionDescription": ""
+    },
+    {
+      "versionName": "ver 0.1",
+      "versionNumber": "0.1.0.NEXT",
+      "path": "version-test-package",
+      "default": false,
+      "package": "VersionCalculationTest2GP",
+      "versionDescription": ""
     }
   ],
   "name": "InvestorFlowPractice",
@@ -23,6 +31,9 @@
   "sourceApiVersion": "66.0",
   "packageAliases": {
     "FundraisingPackage": "0HoWU0000002Z050AE",
-    "PipeRE-Unlocked": "0HoWU0000002euD0AQ"
+    "PipeRE-Unlocked": "0HoWU0000002euD0AQ",
+    "VersionCalculationTest2GP": "0HoWU0000002hTt0AI",
+    "VersionCalculationTest2GP@0.1.0-1": "04tWU000000UJMzYAO",
+    "VersionCalculationTest2GP@26.727.0-1": "04tWU000000UK1JYAW"
   }
 }

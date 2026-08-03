@@ -1,140 +1,61 @@
-name: PipeRE Build Automation
+name: Build
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
-  build-and-install:
-    name: Build, Promote, and Install PipeRE
+  # ---------------------------------------------------------------------
+  # Runs once against the Dev Hub: authenticates, creates the package (if
+  # needed), and STARTS package version creation asynchronously (no
+  # --wait). It does not block waiting for the build to finish - instead
+  # it hands off to check-package-version.yml, which polls until ready.
+  # ---------------------------------------------------------------------
+  build_package:
     runs-on: ubuntu-latest
+    environment: DevHub
+    permissions:
+      contents: write
+      actions: write   # needed to trigger check-package-version.yml
+    defaults:
+      run:
+        working-directory: SFsupport
 
     steps:
+      # 0. Checkout repo
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      # 1. Install Node
+      - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: "24.16.0"
+          node-version: '22'
 
+      # 2. Install Salesforce CLI (latest release line)
       - name: Install Salesforce CLI
-        run: npm install --global @salesforce/cli
+        run: npm install --global @salesforce/cli@latest
 
-      - name: Verify tool versions
+      - name: Verify Salesforce CLI install
+        run: sf --version
+
+      # 3. Write JWT private key to a file
+      - name: Create JWT key file
+        run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
+
+      # 4. Authenticate to the Dev Hub via JWT
+      # SF_DEVHUB_USERNAME and SF_DEVHUB_INSTANCE_URL come from the "DevHub"
+      # environment's variables.
+      - name: Authenticate Dev Hub (JWT)
         run: |
-          node --version
-          sf --version
-
-      - name: Authenticate to Corp Org
-        env:
-          SALESFORCE_JWT_KEY: ${{ secrets.SF_JWT_KEY }}
-          SALESFORCE_CONSUMER_KEY: ${{ secrets.SF_CONSUMER_KEY }}
-          SALESFORCE_DEVHUB_URL: ${{ vars.SF_DEVHUB_URL }}
-          CORP_ORG_USERNAME: ${{ vars.SF_DEVHUB_USERNAME }}
-        run: |
-          echo "$SALESFORCE_JWT_KEY" > ./server.key
-          chmod 600 ./server.key
-
           sf org login jwt \
-            --username "$CORP_ORG_USERNAME" \
-            --client-id "$SALESFORCE_CONSUMER_KEY" \
-            --jwt-key-file ./server.key \
-            --instance-url "$SALESFORCE_DEVHUB_URL" \
-            --set-default-dev-hub \
-            --alias CorpOrg
+            --client-id ${{ secrets.SF_CONSUMER_KEY }} \
+            --jwt-key-file server.key \
+            --username ${{ vars.SF_DEVHUB_USERNAME }} \
+            --instance-url ${{ vars.SF_DEVHUB_INSTANCE_URL }} \
+            --alias devhub \
+            --set-default-dev-hub
 
-          rm -f ./server.key
-
-      - name: Namespace replacement
-        run: node ./scripts/namespace-replace.js
-
-      - name: Calculate package version
-        id: calc_version
-        env:
-          PACKAGE_ID: ${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}
-        run: |
-          VERSION=$(node ./scripts/calculate-version.js)
-          echo "version_number=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Calculated version: $VERSION"
-
-      - name: Create package version
-        id: create_package
-        run: |
-          set +e
-
-          CREATE_RESULT=$(sf package version create \
-            --package "${{ vars.PIPERE_UNLOCKED_PACKAGE_ID }}" \
-            --installation-key-bypass \
-            --version-number "${{ steps.calc_version.outputs.version_number }}" \
-            --code-coverage \
-            --wait 0 \
-            --json 2>&1)
-
-          COMMAND_EXIT_CODE=$?
-
-          set -e
-
-          echo "$CREATE_RESULT" | jq '.' 2>/dev/null || echo "$CREATE_RESULT"
-
-          if [ "$COMMAND_EXIT_CODE" -ne 0 ]; then
-            echo "::error::Salesforce package version creation command failed"
-            exit "$COMMAND_EXIT_CODE"
-          fi
-
-          REQUEST_ID=$(echo "$CREATE_RESULT" | jq -r '.result.Id // empty')
-
-          if [ -z "$REQUEST_ID" ]; then
-            echo "::error::Package version create request ID was not returned"
-            exit 1
-          fi
-
-          echo "request_id=$REQUEST_ID" >> "$GITHUB_OUTPUT"
-          echo "Package version create request submitted: $REQUEST_ID"
-
-      -  name: Wait for build completion
-         id: wait_for_build
-         run: |
-          REQUEST_ID="${{ steps.create_package.outputs.request_id }}"
-
-          for ATTEMPT in $(seq 1 45); do
-            echo "Checking package build status — attempt $ATTEMPT of 45"
-
-            REPORT_RESULT=$(sf package version create report \
-              --package-create-request-id "$REQUEST_ID" \
-              --json)
-
-            echo "$REPORT_RESULT" | jq '.'
-
-            STATUS=$(echo "$REPORT_RESULT" | jq -r '.result[0].Status // empty')
-            PACKAGE_VERSION_ID=$(echo "$REPORT_RESULT" | jq -r '.result[0].SubscriberPackageVersionId // empty')
-            ERRORS=$(echo "$REPORT_RESULT" | jq -r '.result[0].Error[]? // empty')
-
-            if [ "$STATUS" = "Success" ] && [ -n "$PACKAGE_VERSION_ID" ]; then
-              echo "package_version_id=$PACKAGE_VERSION_ID" >> "$GITHUB_OUTPUT"
-              echo "Package build completed successfully: $PACKAGE_VERSION_ID"
-              exit 0
-            fi
-
-            if [ "$STATUS" = "Error" ]; then
-              echo "::error::Package build failed"
-              echo "$ERRORS"
-              exit 1
-            fi
-
-            echo "Current status: ${STATUS:-unknown}. Waiting 60 seconds..."
-            sleep 60
-          done
-
-          echo "::error::Package build did not finish within 45 minutes"
-          exit 1
-
-      - name: Install to target orgs
-        if: ${{ false }}
-        env:
-          TARGET_ORGS: ${{ vars.PIPERE_TARGET_ORGS }}
-        run: node ./scripts/install-to-orgs.js "${{ steps.wait_for_build.outputs.package_version_id }}"
-
-      - name: Notify
-        run: |
-          echo "TODO: post to #release-versions once notification method is decided"
-          echo "Message format: 'PipeRE <version> <install URL>'"
+      # 5. Remove the key file so it doesn't linger on the runner
+      - name: Clean up JWT key file
+        if: always()
+        run: rm -f server.key
