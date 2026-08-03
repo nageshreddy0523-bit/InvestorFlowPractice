@@ -15,10 +15,7 @@ jobs:
     environment: DevHub
     permissions:
       contents: write
-      actions: write   # needed to trigger check-package-version.yml
-    defaults:
-      run:
-        working-directory: InvestorFlowPractice
+      actions: write   # needed to trigger check-package-version.ym
 
     steps:
       # 0. Checkout repo
