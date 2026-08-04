@@ -26,7 +26,7 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: '23.16.0'
+          node-version: '24.16.0'
 
       # 2. Install Salesforce CLI (latest release line)
       - name: Install Salesforce CLI
