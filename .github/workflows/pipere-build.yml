@@ -48,9 +48,9 @@ jobs:
       - name: Calculate package version
         id: version
         run: |
-          OUTPUT=$(node scripts/version-calculation.js)
+          OUTPUT=$(node scripts/calculate-version.js)
           echo "$OUTPUT"
-
+ 
           echo "versionName=$(echo "$OUTPUT" | jq -r '.versionName')" >> "$GITHUB_OUTPUT"
           echo "versionNumber=$(echo "$OUTPUT" | jq -r '.versionNumber')" >> "$GITHUB_OUTPUT"
 
