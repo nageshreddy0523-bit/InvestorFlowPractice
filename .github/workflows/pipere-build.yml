@@ -45,10 +45,6 @@ jobs:
         if: always()
         run: rm -f server.key
 
-      - name: Run namespace replacement
-        run: |
-          node scripts/namespace-replace.js scripts/namespace-config.json
-
       - name: Calculate package version
         id: version
         run: |
