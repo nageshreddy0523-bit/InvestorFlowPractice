@@ -48,7 +48,7 @@ jobs:
             --client-id ${{ secrets.SF_CONSUMER_KEY }} \
             --jwt-key-file server.key \
             --username ${{ vars.SF_DEVHUB_USERNAME }} \
-            --instance-url ${{ vars.SF_DEVHUB_INSTANCE_URL }} \
+            --instance-url ${{ vars.SF_DEVHUB_URL }} \
             --alias devhub \
             --set-default-dev-hub
 
