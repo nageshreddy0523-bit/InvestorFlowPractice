@@ -1,58 +1,78 @@
+
 name: Build
 
 on:
   workflow_dispatch:
 
 jobs:
-  # ---------------------------------------------------------------------
-  # Runs once against the Dev Hub: authenticates, creates the package (if
-  # needed), and STARTS package version creation asynchronously (no
-  # --wait). It does not block waiting for the build to finish - instead
-  # it hands off to check-package-version.yml, which polls until ready.
-  # ---------------------------------------------------------------------
   build_package:
     runs-on: ubuntu-latest
     environment: DevHub
+
     permissions:
       contents: write
-      actions: write   # needed to trigger check-package-version.ym
+      actions: write # Needed to trigger check-package-version.yml
 
     steps:
-      # 0. Checkout repo
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. Install Node
       - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      # 2. Install Salesforce CLI (latest release line)
       - name: Install Salesforce CLI
         run: npm install --global @salesforce/cli@latest
 
-      - name: Verify Salesforce CLI install
+      - name: Verify Salesforce CLI installation
         run: sf --version
 
-      # 3. Write JWT private key to a file
       - name: Create JWT key file
         run: echo "${{ secrets.SF_JWT_KEY }}" > server.key
 
-      # 4. Authenticate to the Dev Hub via JWT
-      # SF_DEVHUB_USERNAME and SF_DEVHUB_INSTANCE_URL come from the "DevHub"
-      # environment's variables.
-      - name: Authenticate Dev Hub (JWT)
+      - name: Authenticate Dev Hub using JWT
         run: |
           sf org login jwt \
-            --client-id ${{ secrets.SF_CONSUMER_KEY }} \
+            --client-id "${{ secrets.SF_CONSUMER_KEY }}" \
             --jwt-key-file server.key \
-            --username ${{ vars.SF_DEVHUB_USERNAME }} \
-            --instance-url ${{ vars.SF_DEVHUB_URL }} \
+            --username "${{ vars.SF_DEVHUB_USERNAME }}" \
+            --instance-url "${{ vars.SF_DEVHUB_URL }}" \
             --alias devhub \
             --set-default-dev-hub
 
-      # 5. Remove the key file so it doesn't linger on the runner
       - name: Clean up JWT key file
         if: always()
         run: rm -f server.key
+
+      - name: Run namespace replacement
+        run: |
+          node scripts/namespace-replace.js scripts/namespace-config.json
+
+      - name: Calculate package version
+        id: version
+        run: |
+          OUTPUT=$(node scripts/version-calculation.js)
+          echo "$OUTPUT"
+
+          echo "versionName=$(echo "$OUTPUT" | jq -r '.versionName')" >> "$GITHUB_OUTPUT"
+          echo "versionNumber=$(echo "$OUTPUT" | jq -r '.versionNumber')" >> "$GITHUB_OUTPUT"
+
+      - name: Start Package Version Creation
+        id: build
+        run: |
+          BUILD_OUTPUT=$(sf package version create \
+            --package "PipeRE" \
+            --installation-key-bypass \
+            --code-coverage \
+            --version-name "${{ steps.version.outputs.versionName }}" \
+            --version-number "${{ steps.version.outputs.versionNumber }}" \
+            --tag "${{ steps.version.outputs.versionName }}" \
+            --target-dev-hub devhub \
+            --wait 0 \
+            --json)
+
+          echo "$BUILD_OUTPUT"
+
+          REQUEST_ID=$(echo "$BUILD_OUTPUT" | jq -r '.result.Id')
+          echo "requestId=$REQUEST_ID" >> "$GITHUB_OUTPUT"
